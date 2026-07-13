@@ -18,6 +18,11 @@ app = FastAPI(title="景区数字人工具", version="1.0.0")
 init_db()
 
 
+@app.on_event("startup")
+async def resume_pipeline_queue():
+    launch()
+
+
 def fail(exc: Exception):
     if isinstance(exc, HTTPException):
         raise exc
@@ -86,7 +91,11 @@ async def create_pipeline_job(request: PipelineRequest):
 
 @app.get("/api/pipeline/jobs")
 def pipeline_jobs():
-    return rows("SELECT * FROM pipeline_jobs ORDER BY id DESC LIMIT 20")
+    return rows("""SELECT j.*,
+      CASE WHEN j.status='queued' THEN
+        (SELECT COUNT(*) FROM pipeline_jobs q WHERE q.status='queued' AND q.id<=j.id)
+      END queue_position
+      FROM pipeline_jobs j ORDER BY j.id DESC LIMIT 20""")
 
 
 @app.get("/api/pipeline/jobs/{job_id}")

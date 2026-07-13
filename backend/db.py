@@ -70,10 +70,10 @@ def init_db() -> None:
         """)
         db.execute("""UPDATE pipeline_jobs SET status='interrupted', completed_at=?,
           error_message=COALESCE(error_message,'服务重启，任务已中断')
-          WHERE status IN ('queued','running')""", (now(),))
+          WHERE status='running'""", (now(),))
         db.execute("""UPDATE pipeline_items SET status='failed', stage='interrupted',
           error_message=COALESCE(error_message,'服务重启，任务已中断'), completed_at=?
-          WHERE status IN ('queued','running')""", (now(),))
+          WHERE status='running'""", (now(),))
         for spot, items in SCENIC_QA.items():
             db.execute("INSERT OR IGNORE INTO scenic_spots(name) VALUES (?)", (spot,))
             spot_id = db.execute("SELECT id FROM scenic_spots WHERE name=?", (spot,)).fetchone()["id"]

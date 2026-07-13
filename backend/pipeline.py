@@ -10,6 +10,7 @@ from .services import generate_video, synthesize
 
 SOURCE_FILES = {"灵山景区": "灵山.mp4", "敦煌": "敦煌.mp4", "西湖": "西湖.mp4"}
 _tasks: set[asyncio.Task] = set()
+_worker_task: asyncio.Task | None = None
 
 
 def available_sources() -> dict[str, dict]:
@@ -19,19 +20,41 @@ def available_sources() -> dict[str, dict]:
     }
 
 
-def launch(job_id: int) -> None:
-    task = asyncio.create_task(run(job_id))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+def launch(job_id: int | None = None) -> None:
+    """确保全局只有一个队列消费者；job_id 仅用于兼容调用方。"""
+    global _worker_task
+    if _worker_task is not None and not _worker_task.done():
+        return
+    _worker_task = asyncio.create_task(_drain_queue())
+    _tasks.add(_worker_task)
+    _worker_task.add_done_callback(_tasks.discard)
+
+
+def next_queued_job_id() -> int | None:
+    with connect() as db:
+        row = db.execute("SELECT id FROM pipeline_jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+    return row["id"] if row else None
+
+
+async def _drain_queue() -> None:
+    """按创建顺序串行执行所有等待任务，单条异常不阻断后续流水线。"""
+    while (job_id := next_queued_job_id()) is not None:
+        try:
+            await run(job_id)
+        except Exception as exc:
+            with connect() as db:
+                db.execute("""UPDATE pipeline_jobs SET status='failed',error_message=?,completed_at=?
+                  WHERE id=? AND status IN ('queued','running')""", (str(exc)[:1000], now(), job_id))
 
 
 async def run(job_id: int) -> None:
     with connect() as db:
         job = db.execute("SELECT * FROM pipeline_jobs WHERE id=?", (job_id,)).fetchone()
-        if not job:
+        if not job or job["status"] != "queued":
             return
         db.execute("UPDATE pipeline_jobs SET status='running',started_at=? WHERE id=?", (now(), job_id))
-        item_ids = [r["id"] for r in db.execute("SELECT id FROM pipeline_items WHERE job_id=? ORDER BY id", (job_id,))]
+        item_ids = [r["id"] for r in db.execute(
+            "SELECT id FROM pipeline_items WHERE job_id=? AND status='queued' ORDER BY id", (job_id,))]
     options = json.loads(job["options_json"])
     for item_id in item_ids:
         await _run_item(item_id, job["voice_id"], options)

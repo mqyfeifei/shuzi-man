@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import AsyncMock, patch
+import backend.pipeline as pipeline
 from backend.config import settings
 from backend.db import init_db, rows
 from backend.services import ServiceError, _extract_tts_audio
@@ -37,5 +39,13 @@ class AppTests(unittest.TestCase):
         self.assertTrue(available_sources()['灵山景区']['available'])
         tables={x['name'] for x in rows("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({'pipeline_jobs','pipeline_items'} <= tables)
+
+
+class PipelineQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queue_drains_jobs_in_order(self):
+        with patch.object(pipeline, 'next_queued_job_id', side_effect=[12, 13, None]), \
+             patch.object(pipeline, 'run', new_callable=AsyncMock) as run:
+            await pipeline._drain_queue()
+        self.assertEqual([call.args[0] for call in run.await_args_list], [12, 13])
 
 if __name__=='__main__':unittest.main()
