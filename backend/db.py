@@ -52,7 +52,28 @@ def init_db() -> None:
           relative_path TEXT, status TEXT NOT NULL, error_message TEXT,
           remote_response TEXT, created_at TEXT NOT NULL, completed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS pipeline_jobs (
+          id INTEGER PRIMARY KEY, voice_id TEXT NOT NULL, status TEXT NOT NULL,
+          total_count INTEGER NOT NULL, completed_count INTEGER NOT NULL DEFAULT 0,
+          success_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0,
+          options_json TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT,
+          completed_at TEXT, error_message TEXT
+        );
+        CREATE TABLE IF NOT EXISTS pipeline_items (
+          id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES pipeline_jobs(id),
+          qa_id INTEGER NOT NULL REFERENCES qa_items(id), status TEXT NOT NULL,
+          stage TEXT NOT NULL, audio_id INTEGER REFERENCES audio_assets(id),
+          video_id INTEGER REFERENCES video_assets(id), source_path TEXT,
+          error_message TEXT, created_at TEXT NOT NULL, completed_at TEXT,
+          UNIQUE(job_id, qa_id)
+        );
         """)
+        db.execute("""UPDATE pipeline_jobs SET status='interrupted', completed_at=?,
+          error_message=COALESCE(error_message,'服务重启，任务已中断')
+          WHERE status IN ('queued','running')""", (now(),))
+        db.execute("""UPDATE pipeline_items SET status='failed', stage='interrupted',
+          error_message=COALESCE(error_message,'服务重启，任务已中断'), completed_at=?
+          WHERE status IN ('queued','running')""", (now(),))
         for spot, items in SCENIC_QA.items():
             db.execute("INSERT OR IGNORE INTO scenic_spots(name) VALUES (?)", (spot,))
             spot_id = db.execute("SELECT id FROM scenic_spots WHERE name=?", (spot,)).fetchone()["id"]
@@ -65,4 +86,3 @@ def init_db() -> None:
 def rows(sql: str, params=()):
     with connect() as db:
         return [dict(r) for r in db.execute(sql, params).fetchall()]
-

@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -11,6 +12,7 @@ from .config import settings
 from .db import connect, init_db, now, rows
 from .services import generate_video, musetalk_health, synthesize
 from .voices import DEFAULT_VOICE_ID, VOICE_IDS, VOICES
+from .pipeline import available_sources, launch
 
 app = FastAPI(title="景区数字人工具", version="1.0.0")
 init_db()
@@ -38,6 +40,66 @@ def qa_list(spot_id: int):
       (SELECT COUNT(*) FROM audio_assets a WHERE a.qa_id=q.id) audio_count,
       (SELECT COUNT(*) FROM video_assets v WHERE v.qa_id=q.id AND v.status='completed') video_count
       FROM qa_items q WHERE q.scenic_spot_id=? ORDER BY q.id""", (spot_id,))
+
+
+class PipelineRequest(BaseModel):
+    qa_ids: list[int] = Field(min_length=1)
+    voice_id: str = DEFAULT_VOICE_ID
+    enhance: bool = True
+    gfpgan_weight: float = Field(default=0.5, ge=0, le=1)
+    bbox_shift: int = 0
+    extra_margin: int = Field(default=10, ge=0, le=40)
+    parsing_mode: str = "jaw"
+    fps: int = Field(default=25, ge=1, le=60)
+    batch_size: int = Field(default=8, ge=1, le=32)
+
+
+@app.get("/api/pipeline/config")
+def pipeline_config():
+    return {"sources": available_sources()}
+
+
+@app.post("/api/pipeline/jobs", status_code=202)
+async def create_pipeline_job(request: PipelineRequest):
+    if request.voice_id not in VOICE_IDS:
+        raise HTTPException(400, "不支持的音色")
+    if request.parsing_mode not in {"jaw", "raw"}:
+        raise HTTPException(400, "不支持的面部融合模式")
+    qa_ids = list(dict.fromkeys(request.qa_ids))
+    placeholders = ",".join("?" for _ in qa_ids)
+    with connect() as db:
+        found = db.execute(f"SELECT id FROM qa_items WHERE id IN ({placeholders})", qa_ids).fetchall()
+        if len(found) != len(qa_ids):
+            raise HTTPException(400, "选择中包含不存在的回答")
+        options = request.model_dump(exclude={"qa_ids", "voice_id"})
+        options = {key: str(value).lower() if isinstance(value, bool) else str(value) for key, value in options.items()}
+        cur = db.execute("""INSERT INTO pipeline_jobs
+          (voice_id,status,total_count,options_json,created_at) VALUES (?,?,?,?,?)""",
+          (request.voice_id, "queued", len(qa_ids), json.dumps(options), now()))
+        job_id = cur.lastrowid
+        db.executemany("""INSERT INTO pipeline_items
+          (job_id,qa_id,status,stage,created_at) VALUES (?,?,'queued','waiting',?)""",
+          [(job_id, qa_id, now()) for qa_id in qa_ids])
+    launch(job_id)
+    return {"id": job_id, "status": "queued", "total_count": len(qa_ids)}
+
+
+@app.get("/api/pipeline/jobs")
+def pipeline_jobs():
+    return rows("SELECT * FROM pipeline_jobs ORDER BY id DESC LIMIT 20")
+
+
+@app.get("/api/pipeline/jobs/{job_id}")
+def pipeline_job(job_id: int):
+    jobs = rows("SELECT * FROM pipeline_jobs WHERE id=?", (job_id,))
+    if not jobs:
+        raise HTTPException(404, "流水线任务不存在")
+    items = rows("""SELECT i.*,q.question,s.name spot_name,a.relative_path audio_path,
+      v.relative_path video_path FROM pipeline_items i JOIN qa_items q ON q.id=i.qa_id
+      JOIN scenic_spots s ON s.id=q.scenic_spot_id
+      LEFT JOIN audio_assets a ON a.id=i.audio_id LEFT JOIN video_assets v ON v.id=i.video_id
+      WHERE i.job_id=? ORDER BY i.id""", (job_id,))
+    return {**jobs[0], "items": items}
 
 
 @app.get("/api/qa/{qa_id}/assets")
