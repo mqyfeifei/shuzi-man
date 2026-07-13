@@ -9,4 +9,4 @@ data/videos/*
 !data/videos/.gitkeep
 data/materials/*
 !data/materials/.gitkeep
-
+.idea
