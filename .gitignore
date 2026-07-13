@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/app.db
+data/audio/*
+!data/audio/.gitkeep
+data/videos/*
+!data/videos/.gitkeep
+data/materials/*
+!data/materials/.gitkeep
+
