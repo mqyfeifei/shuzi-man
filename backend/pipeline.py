@@ -57,7 +57,7 @@ async def run(job_id: int) -> None:
             "SELECT id FROM pipeline_items WHERE job_id=? AND status='queued' ORDER BY id", (job_id,))]
     options = json.loads(job["options_json"])
     for item_id in item_ids:
-        await _run_item(item_id, job["voice_id"], options)
+        await _run_item(item_id, job["voice_id"], job["language"], options)
         with connect() as db:
             counts = db.execute("""SELECT COUNT(*) completed_count,
               SUM(status='completed') success_count,SUM(status='failed') failed_count
@@ -70,21 +70,24 @@ async def run(job_id: int) -> None:
                    ("completed_with_errors" if failed else "completed", now(), job_id))
 
 
-async def _run_item(item_id: int, voice_id: str, options: dict) -> None:
+async def _run_item(item_id: int, voice_id: str, language: str, options: dict) -> None:
     audio_path = None
     try:
         with connect() as db:
-            item = db.execute("""SELECT i.*,q.answer,q.scenic_spot_id,s.name spot_name
+            item = db.execute("""SELECT i.*,q.answer,q.answer_en,q.scenic_spot_id,s.name spot_name
               FROM pipeline_items i JOIN qa_items q ON q.id=i.qa_id
               JOIN scenic_spots s ON s.id=q.scenic_spot_id WHERE i.id=?""", (item_id,)).fetchone()
             db.execute("UPDATE pipeline_items SET status='running',stage='tts' WHERE id=?", (item_id,))
         audio_name = f"qa_{item['qa_id']}_{uuid.uuid4().hex[:12]}.mp3"
-        audio_path = settings.audio_dir / audio_name
-        await synthesize(item["answer"], voice_id, audio_path)
+        audio_dir = settings.audio_dir / language
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_dir / audio_name
+        await synthesize(item["answer_en"] if language == "en" else item["answer"], voice_id, audio_path)
         with connect() as db:
             cur = db.execute("""INSERT INTO audio_assets
-              (qa_id,filename,relative_path,speaker_id,resource_id,created_at) VALUES (?,?,?,?,?,?)""",
-              (item["qa_id"], audio_name, f"audio/{audio_name}", voice_id, settings.tts_cluster, now()))
+              (qa_id,filename,relative_path,speaker_id,resource_id,created_at,language)
+              VALUES (?,?,?,?,?,?,?)""",
+              (item["qa_id"], audio_name, f"audio/{language}/{audio_name}", voice_id, settings.tts_cluster, now(), language))
             audio_id = cur.lastrowid
             db.execute("UPDATE pipeline_items SET audio_id=?,stage='video' WHERE id=?", (audio_id, item_id))
 
@@ -101,17 +104,20 @@ async def _run_item(item_id: int, voice_id: str, options: dict) -> None:
                   (original_name,stored_name,relative_path,media_type,created_at) VALUES (?,?,?,?,?)""",
                   (source_name, source_name, source_name, "video/mp4", now()))
                 source_id = cur.lastrowid
-            cur = db.execute("INSERT INTO video_assets (qa_id,audio_id,source_id,status,created_at) VALUES (?,?,?,?,?)",
-                             (item["qa_id"], audio_id, source_id, "processing", now()))
+            cur = db.execute("""INSERT INTO video_assets
+              (qa_id,audio_id,source_id,status,created_at,language) VALUES (?,?,?,?,?,?)""",
+              (item["qa_id"], audio_id, source_id, "processing", now(), language))
             video_id = cur.lastrowid
             db.execute("UPDATE pipeline_items SET video_id=?,source_path=? WHERE id=?", (video_id, source_name, item_id))
         video_name = f"avatar_{video_id}_{uuid.uuid4().hex[:10]}.mp4"
         remote_options = {**options, "output_name": Path(video_name).stem}
-        result = await generate_video(source, audio_path, settings.video_dir / video_name, remote_options)
+        video_dir = settings.video_dir / language
+        video_dir.mkdir(parents=True, exist_ok=True)
+        result = await generate_video(source, audio_path, video_dir / video_name, remote_options)
         with connect() as db:
             db.execute("""UPDATE video_assets SET filename=?,relative_path=?,status='completed',
               remote_response=?,completed_at=? WHERE id=?""",
-              (video_name, f"videos/{video_name}", json.dumps(result, ensure_ascii=False), now(), video_id))
+              (video_name, f"videos/{language}/{video_name}", json.dumps(result, ensure_ascii=False), now(), video_id))
             db.execute("UPDATE pipeline_items SET status='completed',stage='completed',completed_at=? WHERE id=?", (now(), item_id))
     except Exception as exc:
         with connect() as db:

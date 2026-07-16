@@ -27,7 +27,8 @@ def organized_filename(sequence: int, spot_name: str, question: str, duplicate_i
 def organize_final_videos() -> dict:
     settings.final_video_dir.mkdir(parents=True, exist_ok=True)
     records = rows("""SELECT v.id video_id,v.filename,v.relative_path,
-      q.id qa_id,q.question,q.answer,q.scenic_spot_id,s.name spot_name,
+      q.id qa_id,q.question,q.answer,q.question_en,q.answer_en,q.scenic_spot_id,s.name spot_name,
+      COALESCE(v.language,'zh') language,
       (SELECT COUNT(*) FROM qa_items earlier
        WHERE earlier.scenic_spot_id=q.scenic_spot_id AND earlier.id<=q.id) question_sequence
       FROM video_assets v
@@ -47,7 +48,7 @@ def organize_final_videos() -> dict:
             missing.append(item["filename"])
             continue
         folder_name = SPOT_FOLDER_NAMES.get(item["spot_name"], item["spot_name"])
-        target_dir = settings.final_video_dir / folder_name
+        target_dir = settings.final_video_dir / folder_name / item["language"]
         target_dir.mkdir(parents=True, exist_ok=True)
         duplicate_index = duplicate_counts[item["qa_id"]]
         duplicate_counts[item["qa_id"]] += 1
@@ -57,27 +58,28 @@ def organize_final_videos() -> dict:
         target = target_dir / target_name
         shutil.copy2(source, target)
         copied.append({"source": source.name, "target": str(target.relative_to(settings.data_dir))})
-        questions_by_spot[item["spot_name"]][item["qa_id"]] = item
+        questions_by_spot[(item["spot_name"], item["language"])][item["qa_id"]] = item
 
-    for spot_name, questions in questions_by_spot.items():
+    for (spot_name, language), questions in questions_by_spot.items():
         folder_name = SPOT_FOLDER_NAMES.get(spot_name, spot_name)
-        target_dir = settings.final_video_dir / folder_name
+        target_dir = settings.final_video_dir / folder_name / language
         blocks = []
         for item in sorted(questions.values(), key=lambda row: row["question_sequence"]):
-            blocks.append(
-                f"问题ID：{item['question_sequence']:03d}\n问题：{item['question']}\n答案：{item['answer']}"
-            )
-        (target_dir / f"{folder_name}问答.txt").write_text("\n\n".join(blocks), encoding="utf-8")
+            if language == "en":
+                blocks.append(f"Question ID: {item['question_sequence']:03d}\nQuestion: {item['question_en']}\nAnswer: {item['answer_en']}")
+            else:
+                blocks.append(f"问题ID：{item['question_sequence']:03d}\n问题：{item['question']}\n答案：{item['answer']}")
+        (target_dir / f"{folder_name}_qa_{language}.txt").write_text("\n\n".join(blocks), encoding="utf-8")
 
     unmatched = [
-        path.name for path in settings.video_dir.glob("*.mp4") if path.resolve() not in known_sources
+        path.name for path in settings.video_dir.glob("**/*.mp4") if path.resolve() not in known_sources
     ]
     return {
         "copied_count": len(copied),
         "missing_count": len(missing),
         "unmatched_count": len(unmatched),
         "output_dir": str(settings.final_video_dir),
-        "folders": sorted(SPOT_FOLDER_NAMES.get(name, name) for name in questions_by_spot),
+        "folders": sorted(f"{SPOT_FOLDER_NAMES.get(name, name)}/{language}" for name, language in questions_by_spot),
         "missing_files": missing,
         "unmatched_files": unmatched,
     }

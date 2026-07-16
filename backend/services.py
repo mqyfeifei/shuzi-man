@@ -36,6 +36,8 @@ async def synthesize(text: str, voice_id: str, output: Path) -> None:
         "audio": {"voice_type": voice_id, "encoding": "mp3", "speed_ratio": 1.0, "volume_ratio": 1.0, "pitch_ratio": 1.0},
         "request": {"reqid": str(uuid.uuid4()), "text": text, "text_type": "plain", "operation": "query", "with_frontend": 1, "frontend_type": "unitTson"},
     }
+    # if voice_info["lang"] == "en":
+    #     payload["audio"]["language"] = "en"
     async with httpx.AsyncClient(timeout=settings.timeout) as client:
         response = await client.post(settings.tts_url, headers=headers, json=payload)
     if response.status_code >= 400:

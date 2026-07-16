@@ -43,7 +43,7 @@ def tts_voices():
 
 @app.get("/api/scenic-spots/{spot_id}/qa")
 def qa_list(spot_id: int):
-    return rows("""SELECT q.id,q.question,q.answer,
+    return rows("""SELECT q.id,q.question,q.answer,q.question_en,q.answer_en,
       (SELECT COUNT(*) FROM audio_assets a WHERE a.qa_id=q.id) audio_count,
       (SELECT COUNT(*) FROM video_assets v WHERE v.qa_id=q.id AND v.status='completed') video_count
       FROM qa_items q WHERE q.scenic_spot_id=? ORDER BY q.id""", (spot_id,))
@@ -52,6 +52,7 @@ def qa_list(spot_id: int):
 class PipelineRequest(BaseModel):
     qa_ids: list[int] = Field(min_length=1)
     voice_id: str = DEFAULT_VOICE_ID
+    language: str = "zh"
     enhance: bool = True
     gfpgan_weight: float = Field(default=0.5, ge=0, le=1)
     bbox_shift: int = 0
@@ -80,6 +81,8 @@ def organize_videos():
 
 @app.post("/api/pipeline/jobs", status_code=202)
 async def create_pipeline_job(request: PipelineRequest):
+    if request.language not in {"zh", "en"}:
+        raise HTTPException(400, "仅支持中文或英文")
     if request.voice_id not in VOICE_IDS:
         raise HTTPException(400, "不支持的音色")
     if request.parsing_mode not in {"jaw", "raw"}:
@@ -90,11 +93,16 @@ async def create_pipeline_job(request: PipelineRequest):
         found = db.execute(f"SELECT id FROM qa_items WHERE id IN ({placeholders})", qa_ids).fetchall()
         if len(found) != len(qa_ids):
             raise HTTPException(400, "选择中包含不存在的回答")
-        options = request.model_dump(exclude={"qa_ids", "voice_id"})
+        if request.language == "en":
+            translated = db.execute(f"""SELECT COUNT(*) count FROM qa_items
+              WHERE id IN ({placeholders}) AND question_en IS NOT NULL AND answer_en IS NOT NULL""", qa_ids).fetchone()["count"]
+            if translated != len(qa_ids):
+                raise HTTPException(400, "选择中包含尚无英文版本的问答")
+        options = request.model_dump(exclude={"qa_ids", "voice_id", "language"})
         options = {key: str(value).lower() if isinstance(value, bool) else str(value) for key, value in options.items()}
         cur = db.execute("""INSERT INTO pipeline_jobs
-          (voice_id,status,total_count,options_json,created_at) VALUES (?,?,?,?,?)""",
-          (request.voice_id, "queued", len(qa_ids), json.dumps(options), now()))
+          (voice_id,status,total_count,options_json,created_at,language) VALUES (?,?,?,?,?,?)""",
+          (request.voice_id, "queued", len(qa_ids), json.dumps(options), now(), request.language))
         job_id = cur.lastrowid
         db.executemany("""INSERT INTO pipeline_items
           (job_id,qa_id,status,stage,created_at) VALUES (?,?,'queued','waiting',?)""",
@@ -117,8 +125,11 @@ def pipeline_job(job_id: int):
     jobs = rows("SELECT * FROM pipeline_jobs WHERE id=?", (job_id,))
     if not jobs:
         raise HTTPException(404, "流水线任务不存在")
-    items = rows("""SELECT i.*,q.question,s.name spot_name,a.relative_path audio_path,
+    items = rows("""SELECT i.*,
+      CASE WHEN j.language='en' THEN q.question_en ELSE q.question END question,
+      s.name spot_name,a.relative_path audio_path,
       v.relative_path video_path FROM pipeline_items i JOIN qa_items q ON q.id=i.qa_id
+      JOIN pipeline_jobs j ON j.id=i.job_id
       JOIN scenic_spots s ON s.id=q.scenic_spot_id
       LEFT JOIN audio_assets a ON a.id=i.audio_id LEFT JOIN video_assets v ON v.id=i.video_id
       WHERE i.job_id=? ORDER BY i.id""", (job_id,))
@@ -134,23 +145,31 @@ def qa_assets(qa_id: int):
 
 
 @app.post("/api/qa/{qa_id}/tts")
-async def create_tts(qa_id: int, voice_id: str = Form(DEFAULT_VOICE_ID)):
+async def create_tts(qa_id: int, voice_id: str = Form(DEFAULT_VOICE_ID), language: str = Form("zh")):
+    if language not in {"zh", "en"}:
+        raise HTTPException(400, "仅支持中文或英文")
     if voice_id not in VOICE_IDS:
         raise HTTPException(400, "不支持的音色，请从音色列表中选择")
     with connect() as db:
         qa = db.execute("SELECT * FROM qa_items WHERE id=?", (qa_id,)).fetchone()
     if not qa:
         raise HTTPException(404, "问答不存在")
+    text = qa["answer_en"] if language == "en" else qa["answer"]
+    if not text:
+        raise HTTPException(400, "该问答尚无英文版本")
     filename = f"qa_{qa_id}_{uuid.uuid4().hex[:12]}.mp3"
-    output = settings.audio_dir / filename
+    output_dir = settings.audio_dir / language
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / filename
     try:
-        await synthesize(qa["answer"], voice_id, output)
+        await synthesize(text, voice_id, output)
         with connect() as db:
             cur = db.execute("""INSERT INTO audio_assets
-              (qa_id,filename,relative_path,speaker_id,resource_id,created_at) VALUES (?,?,?,?,?,?)""",
-              (qa_id, filename, f"audio/{filename}", voice_id, settings.tts_cluster, now()))
+              (qa_id,filename,relative_path,speaker_id,resource_id,created_at,language)
+              VALUES (?,?,?,?,?,?,?)""",
+              (qa_id, filename, f"audio/{language}/{filename}", voice_id, settings.tts_cluster, now(), language))
             audio_id = cur.lastrowid
-        return {"id": audio_id, "filename": filename, "voice_id": voice_id, "url": f"/media/audio/{filename}"}
+        return {"id": audio_id, "filename": filename, "voice_id": voice_id, "language": language, "url": f"/media/audio/{language}/{filename}"}
     except Exception as exc:
         output.unlink(missing_ok=True)
         fail(exc)
@@ -219,23 +238,29 @@ async def create_video(
                "extra_margin": str(extra_margin), "parsing_mode": parsing_mode, "left_cheek_width": "90",
                "right_cheek_width": "90", "fps": str(fps), "batch_size": str(batch_size), "output_name": Path(filename).stem}
     try:
-        result = await generate_video(settings.data_dir / source["relative_path"], settings.data_dir / audio["relative_path"], settings.video_dir / filename, options)
+        language = audio["language"]
+        output_dir = settings.video_dir / language
+        output_dir.mkdir(parents=True, exist_ok=True)
+        result = await generate_video(settings.data_dir / source["relative_path"], settings.data_dir / audio["relative_path"], output_dir / filename, options)
         with connect() as db:
             db.execute("""UPDATE video_assets SET filename=?,relative_path=?,status='completed',remote_response=?,completed_at=? WHERE id=?""",
-                       (filename, f"videos/{filename}", json.dumps(result, ensure_ascii=False), now(), video_id))
-        return {"id": video_id, "filename": filename, "url": f"/media/videos/{filename}", "status": "completed"}
+                       (filename, f"videos/{language}/{filename}", json.dumps(result, ensure_ascii=False), now(), video_id))
+            db.execute("UPDATE video_assets SET language=? WHERE id=?", (language, video_id))
+        return {"id": video_id, "filename": filename, "language": language,
+                "url": f"/media/videos/{language}/{filename}", "status": "completed"}
     except Exception as exc:
         with connect() as db:
             db.execute("UPDATE video_assets SET status='failed',error_message=?,completed_at=? WHERE id=?", (str(exc)[:1000], now(), video_id))
         fail(exc)
 
 
-@app.get("/media/{kind}/{filename}")
+@app.get("/media/{kind}/{filename:path}")
 def media(kind: str, filename: str):
     folders = {"audio": settings.audio_dir, "videos": settings.video_dir, "materials": settings.material_dir}
-    if kind not in folders or Path(filename).name != filename:
+    relative = Path(filename)
+    if kind not in folders or relative.is_absolute() or ".." in relative.parts:
         raise HTTPException(404)
-    path = folders[kind] / filename
+    path = folders[kind] / relative
     if not path.is_file():
         raise HTTPException(404)
     return FileResponse(path)

@@ -8,7 +8,8 @@ from .voices import VOICES
 
 def generate_video_catalog(base_url: str) -> tuple[Path, int]:
     records = rows("""SELECT v.id video_id,v.filename video_filename,v.relative_path video_path,
-      v.completed_at,q.question,q.answer,s.name spot_name,
+      v.completed_at,q.question,q.answer,q.question_en,q.answer_en,
+      COALESCE(v.language,'zh') language,s.name spot_name,
       a.id audio_id,a.filename audio_filename,a.relative_path audio_path,a.speaker_id
       FROM video_assets v
       JOIN qa_items q ON q.id=v.qa_id
@@ -20,6 +21,8 @@ def generate_video_catalog(base_url: str) -> tuple[Path, int]:
     root = base_url.rstrip("/")
     cards = []
     for item in records:
+        question = item["question_en"] if item["language"] == "en" else item["question"]
+        answer = item["answer_en"] if item["language"] == "en" else item["answer"]
         audio_url = f"{root}/media/{item['audio_path']}"
         video_url = f"{root}/media/{item['video_path']}"
         audio_local = settings.data_dir / item["audio_path"]
@@ -28,8 +31,8 @@ def generate_video_catalog(base_url: str) -> tuple[Path, int]:
         cards.append(f"""
         <article>
           <div class="top"><span>{escape(item['spot_name'])}</span><b>视频 #{item['video_id']}</b></div>
-          <h2>{escape(item['question'])}</h2>
-          <p class="answer">{escape(item['answer'])}</p>
+          <h2>{escape(question or '')}</h2>
+          <p class="answer">{escape(answer or '')}</p>
           <dl>
             <dt>合成音色</dt><dd>{escape(voice)} <code>{escape(item['speaker_id'])}</code></dd>
             <dt>音频</dt><dd><a href="{escape(audio_url)}" target="_blank">播放 / 打开音频</a><br><code>{escape(str(audio_local.resolve()))}</code></dd>

@@ -25,6 +25,9 @@ def connect():
 def init_db() -> None:
     for folder in (settings.data_dir, settings.audio_dir, settings.video_dir, settings.material_dir, settings.final_video_dir):
         folder.mkdir(parents=True, exist_ok=True)
+    for language in ("zh", "en"):
+        (settings.audio_dir / language).mkdir(parents=True, exist_ok=True)
+        (settings.video_dir / language).mkdir(parents=True, exist_ok=True)
     with connect() as db:
         db.executescript("""
         CREATE TABLE IF NOT EXISTS scenic_spots (
@@ -68,6 +71,11 @@ def init_db() -> None:
           UNIQUE(job_id, qa_id)
         );
         """)
+        _add_column(db, "qa_items", "question_en", "TEXT")
+        _add_column(db, "qa_items", "answer_en", "TEXT")
+        _add_column(db, "audio_assets", "language", "TEXT NOT NULL DEFAULT 'zh'")
+        _add_column(db, "video_assets", "language", "TEXT NOT NULL DEFAULT 'zh'")
+        _add_column(db, "pipeline_jobs", "language", "TEXT NOT NULL DEFAULT 'zh'")
         db.execute("""UPDATE pipeline_jobs SET status='interrupted', completed_at=?,
           error_message=COALESCE(error_message,'服务重启，任务已中断')
           WHERE status='running'""", (now(),))
@@ -81,6 +89,24 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO qa_items(scenic_spot_id,question,answer,created_at) VALUES (?,?,?,?)",
                 [(spot_id, q, a, now()) for q, a in items],
             )
+        try:
+            from .qa_en import SCENIC_QA_EN
+        except ImportError:
+            SCENIC_QA_EN = {}
+        for spot, items in SCENIC_QA_EN.items():
+            spot_row = db.execute("SELECT id FROM scenic_spots WHERE name=?", (spot,)).fetchone()
+            if not spot_row:
+                continue
+            for question_zh, question_en, answer_en in items:
+                db.execute("""UPDATE qa_items SET question_en=?,answer_en=?
+                  WHERE scenic_spot_id=? AND question=?""",
+                  (question_en, answer_en, spot_row["id"], question_zh))
+
+
+def _add_column(db, table: str, column: str, declaration: str) -> None:
+    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def rows(sql: str, params=()):
