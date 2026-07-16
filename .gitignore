@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 data/app.db
+data/video_catalog.html
+data/final_videos/
 data/audio/*
 !data/audio/.gitkeep
 data/videos/*

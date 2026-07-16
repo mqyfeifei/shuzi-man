@@ -27,6 +27,7 @@ class Settings:
     db_path: Path = ROOT / "data" / "app.db"
     audio_dir: Path = ROOT / "data" / "audio"
     video_dir: Path = ROOT / "data" / "videos"
+    final_video_dir: Path = ROOT / "data" / "final_videos"
     material_dir: Path = ROOT / "data" / "materials"
     tts_app_id: str = os.getenv("TTS_APP_ID", "")
     tts_access_token: str = os.getenv("TTS_ACCESS_TOKEN", "")

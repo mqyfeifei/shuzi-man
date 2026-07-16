@@ -23,7 +23,7 @@ def connect():
 
 
 def init_db() -> None:
-    for folder in (settings.data_dir, settings.audio_dir, settings.video_dir, settings.material_dir):
+    for folder in (settings.data_dir, settings.audio_dir, settings.video_dir, settings.material_dir, settings.final_video_dir):
         folder.mkdir(parents=True, exist_ok=True)
     with connect() as db:
         db.executescript("""

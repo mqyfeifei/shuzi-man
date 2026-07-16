@@ -3,7 +3,7 @@ import mimetypes
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +13,8 @@ from .db import connect, init_db, now, rows
 from .services import generate_video, musetalk_health, synthesize
 from .voices import DEFAULT_VOICE_ID, VOICE_IDS, VOICES
 from .pipeline import available_sources, launch
+from .catalog import generate_video_catalog
+from .final_videos import organize_final_videos
 
 app = FastAPI(title="景区数字人工具", version="1.0.0")
 init_db()
@@ -62,6 +64,18 @@ class PipelineRequest(BaseModel):
 @app.get("/api/pipeline/config")
 def pipeline_config():
     return {"sources": available_sources()}
+
+
+@app.get("/api/video-catalog/export")
+def export_video_catalog(request: Request):
+    path, _ = generate_video_catalog(str(request.base_url))
+    return FileResponse(path, media_type="text/html; charset=utf-8",
+                        headers={"Content-Disposition": 'inline; filename="video_catalog.html"'})
+
+
+@app.post("/api/final-videos/organize")
+def organize_videos():
+    return organize_final_videos()
 
 
 @app.post("/api/pipeline/jobs", status_code=202)

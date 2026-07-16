@@ -56,3 +56,8 @@ SCENIC_QA = {
         ("节假日游西湖如何避开人流？", "尽量早晨出发，避开断桥、苏堤等核心点位的午后高峰；优先乘公共交通，不建议自驾进入核心景区，并关注实时客流和交通管制。"),
     ],
 }
+
+from .qa_expansion import QA_EXPANSION
+
+for _spot, _items in QA_EXPANSION.items():
+    SCENIC_QA[_spot].extend(_items)
